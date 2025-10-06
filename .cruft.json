@@ -1,0 +1,23 @@
+{
+  "template": "https://www.github.com/dietervansteenwegen/python_cookie.git",
+  "commit": "7e2fa883335a5b2c113f5499d37fd0cf13dd2fb7",
+  "checkout": null,
+  "context": {
+    "cookiecutter": {
+      "project_name": "Panthyr SFTP library",
+      "project_name_short": "panthyr_sftp",
+      "project_link": "https://waterhypernet.org/equipment/",
+      "module_name": "p_sftp",
+      "class_name": "PSFTP",
+      "project_description": "SFTP library for the Panthyr pan-tilt hyperspectral radiometer.",
+      "keywords": "'Panthyr', 'SFTP',",
+      "use_config_file": false,
+      "add_documentation": true,
+      "add_gui": false,
+      "create_assets_dir": false,
+      "create_env_template": false,
+      "_template": "https://www.github.com/dietervansteenwegen/python_cookie.git"
+    }
+  },
+  "directory": null
+}
