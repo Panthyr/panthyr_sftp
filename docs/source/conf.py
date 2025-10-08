@@ -9,11 +9,12 @@
 # add these directories to sys.path here. If the directory is relative to the
 # documentation root, use os.path.abspath to make it absolute, like shown here.
 #
-import os
 import sys
+from pathlib import Path
+
 from p_sftp import __version__
 
-sys.path.insert(0, os.path.abspath('../..'))
+sys.path.insert(0, str(Path('../..').resolve()))
 
 # -- Project information -----------------------------------------------------
 
@@ -21,6 +22,7 @@ project = 'Panthyr SFTP library'
 author = 'Dieter Vansteenwegen'
 
 # The full version, including alpha/beta/rc tags
+
 # Import version from the package
 release = __version__
 
@@ -36,7 +38,7 @@ extensions = [
     'sphinx.ext.autosummary',
     'sphinx_copybutton',
     'sphinx_toggleprompt',
-    'myst_parser'
+    'myst_parser',
 ]
 
 # Add any paths that contain templates here, relative to this directory.
