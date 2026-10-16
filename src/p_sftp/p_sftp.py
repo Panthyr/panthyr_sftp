@@ -6,14 +6,15 @@ __project__ = 'Panthyr SFTP library'
 __project_link__ = 'https://waterhypernet.org/equipment/'
 
 import logging
-import socket
-import time
-from pathlib import Path
-from typing import Optional, Union
-
-import paramiko
+import shutil
+import subprocess
+from pathlib import Path, PurePosixPath
+from typing import Dict, List, Optional, Union
 
 log = logging.getLogger(__name__)
+
+DEFAULT_ENV_FILE = '/home/panthyr/data/sftp.env'
+SFTP_BINARY = 'sftp'
 
 
 # ============================================================================
@@ -23,6 +24,10 @@ log = logging.getLogger(__name__)
 
 class PsFTPError(Exception):
     """Base exception class for all PsFTP errors."""
+
+
+class PsFTPConfigError(PsFTPError):
+    """Exception raised when the configuration (env file) is missing or invalid."""
 
 
 class PsFTPConnectionError(PsFTPError):
@@ -54,75 +59,115 @@ class PsFTPVerificationError(PsFTPError):
 
 
 # ============================================================================
+# Helpers
+# ============================================================================
+
+
+def _read_env_file(env_file: Union[str, Path]) -> Dict[str, str]:
+    """Parse a simple KEY=VALUE file (comments with '#', optional quotes)."""
+    path = Path(env_file)
+    try:
+        text = path.read_text(encoding='utf-8')
+    except OSError as e:
+        msg = f'Cannot read config file {path}: {e}'
+        raise PsFTPConfigError(msg) from e
+
+    values: Dict[str, str] = {}
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith('#') or '=' not in line:
+            continue
+        if line.startswith('export '):
+            line = line[len('export ') :].lstrip()
+        key, _, value = line.partition('=')
+        value = value.strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in ('"', "'"):
+            value = value[1:-1]
+        values[key.strip()] = value
+    return values
+
+
+def _quote(path: str) -> str:
+    """Quote a path for use in an sftp batch command."""
+    return '"' + path.replace('\\', '\\\\').replace('"', '\\"') + '"'
+
+
+# ============================================================================
 # Main SFTP Client Class
 # ============================================================================
 
 
 class PsFTP:
-    """SFTP client for uploading files to a remote server.
+    """SFTP client that uploads files using the system OpenSSH ``sftp`` binary.
 
-    Supports atomic uploads, bandwidth throttling, automatic verification,
-    and configurable timeouts with TCP keepalive.
+    Authentication is done with an SSH key. Connection settings are read from an env file
+    (default ``/home/panthyr/data/sftp.env``) with the keys SFTP_SERVER, SFTP_PORT, SFTP_USER,
+    SFTP_KEY_FILE and SFTP_REMOTE_DIR. Explicit constructor arguments override the file.
 
-    Features:
-        - Atomic uploads (temporary file + rename after verification)
-        - Bandwidth throttling (configurable KB/s limit)
-        - Automatic file size verification
-        - Configurable connection and socket timeouts
-        - TCP keepalive for long-running connections
-        - Automatic remote directory creation
-        - Comprehensive error handling with custom exceptions
+    Every upload runs in a new ``sftp`` process (batch mode); ``connect()`` verifies that the
+    server can be reached and the key is accepted.
+
+    Remote paths given to :meth:`upload_file` are relative to ``/<SFTP_REMOTE_DIR>/`` on the
+    server. Missing directories are created.
 
     Example:
-        >>> with PsFTP('server.com', 'user', 'pass') as client:
-        ...     client.upload_file('file.txt', '/remote/file.txt', max_upload_speed_kb=100)
+        >>> with PsFTP() as client:
+        ...     client.upload_file('file.txt', '2026/file.txt', max_upload_speed_kb=100)
     """
 
     def __init__(
         self,
-        server: str,
-        user: str,
-        password: str,
-        port: int = 22,
+        server: Optional[str] = None,
+        user: Optional[str] = None,
+        key_file: Optional[str] = None,
+        port: Optional[int] = None,
         timeout: int = 20,
+        remote_dir: Optional[str] = None,
+        env_file: Union[str, Path] = DEFAULT_ENV_FILE,
     ) -> None:
         """Initialize PsFTP client.
 
         Args:
-            server: The hostname or IP address of the SFTP server
-            user: The username for authentication
-            password: The password for authentication
-            port: The port number for the SFTP server (default: 22)
-            timeout: Connection and socket timeout in seconds (default: 20)
+            server: Server hostname/IP (default: SFTP_SERVER from env file)
+            user: Username (default: SFTP_USER)
+            key_file: Path to the SSH private key (default: SFTP_KEY_FILE)
+            port: Server port (default: SFTP_PORT, or 22)
+            timeout: Connection timeout in seconds, also used per sftp operation (default: 20)
+            remote_dir: Directory in the server root to upload into (default: SFTP_REMOTE_DIR)
+            env_file: Path to the env file
+
+        Raises:
+            PsFTPConfigError: If a required setting is missing or invalid
         """
-        self.server = server
-        self.user = user
-        self.password = password
-        self.port = port
+        env: Dict[str, str] = {}
+        if None in (server, user, key_file, remote_dir):
+            env = _read_env_file(env_file)
+
+        self.server = self._require(server, env, 'SFTP_SERVER')
+        self.user = self._require(user, env, 'SFTP_USER')
+        self.key_file = self._require(key_file, env, 'SFTP_KEY_FILE')
+        self.remote_dir = self._require(remote_dir, env, 'SFTP_REMOTE_DIR').strip('/')
+        try:
+            self.port = int(port if port is not None else env.get('SFTP_PORT', 22))
+        except ValueError as e:
+            msg = f'Invalid SFTP_PORT: {env.get("SFTP_PORT")}'
+            raise PsFTPConfigError(msg) from e
         self.timeout = timeout
-        self._client: Optional[paramiko.SSHClient] = None
-        self._sftp: Optional[paramiko.SFTPClient] = None
+        self._connected = False
+
+    @staticmethod
+    def _require(value: Optional[str], env: Dict[str, str], name: str) -> str:
+        result = value if value is not None else env.get(name)
+        if not result:
+            msg = f'Missing setting {name} (not passed and not found in env file)'
+            raise PsFTPConfigError(msg)
+        return result
 
     def __enter__(self) -> 'PsFTP':
-        """Context manager entry.
-
-        Returns:
-            Self instance for use in with statement
-        """
         self.connect()
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb) -> bool:
-        """Context manager exit.
-
-        Args:
-            exc_type: Exception type if raised
-            exc_val: Exception value if raised
-            exc_tb: Exception traceback if raised
-
-        Returns:
-            False to propagate any exception
-        """
         self.disconnect()
         return False
 
@@ -131,56 +176,48 @@ class PsFTP:
     # ========================================================================
 
     def connect(self) -> None:
-        """Establish connection to the SFTP server.
+        """Check that the server is reachable and the key is accepted.
 
         Raises:
+            PsFTPConfigError: If the sftp binary or key file is missing
             PsFTPAuthenticationError: If authentication fails
             PsFTPConnectionError: If connection to SFTP server fails
         """
+        if shutil.which(SFTP_BINARY) is None:
+            msg = f'"{SFTP_BINARY}" executable not found in PATH'
+            raise PsFTPConfigError(msg)
+        if not Path(self.key_file).is_file():
+            msg = f'SSH key file not found: {self.key_file}'
+            raise PsFTPConfigError(msg)
+
+        log.info(f'Connecting to SFTP server {self.server}:{self.port} (timeout: {self.timeout}s)')
         try:
-            log.info(
-                f'Connecting to SFTP server {self.server}:{self.port} (timeout: {self.timeout}s)'
-            )
-            self._client = paramiko.SSHClient()
-            self._client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-
-            # Connect with timeout and TCP keepalive settings
-            self._client.connect(
-                hostname=self.server,
-                port=self.port,
-                username=self.user,
-                password=self.password,
-                timeout=self.timeout,
-                banner_timeout=self.timeout,
-                auth_timeout=self.timeout,
-            )
-
-            # Get the underlying transport and configure TCP keepalive
-            transport = self._client.get_transport()
-            if transport:
-                transport.set_keepalive(30)  # Send keepalive packet every 30 seconds
-                # Set socket timeout for SFTP operations
-                sock = transport.sock
-                if sock:
-                    sock.settimeout(self.timeout)
-
-            self._sftp = self._client.open_sftp()
-            log.info(f'Successfully connected to {self.server}')
-        except paramiko.AuthenticationException as e:
-            msg = f'Authentication failed for {self.user}@{self.server}: {e}'
+            result = self._run_batch(['pwd'])
+        except subprocess.TimeoutExpired as e:
+            msg = f'Connection to {self.server} timed out after {self.timeout}s'
             log.error(msg)
-            raise PsFTPAuthenticationError(msg) from e
-        except (paramiko.SSHException, OSError, TimeoutError) as e:
-            msg = f'Failed to connect to {self.server}: {e}'
+            raise PsFTPConnectionError(msg) from e
+        except OSError as e:
+            msg = f'Failed to run {SFTP_BINARY}: {e}'
             log.error(msg)
             raise PsFTPConnectionError(msg) from e
 
+        if result.returncode != 0:
+            stderr = result.stderr.strip()
+            if 'permission denied' in stderr.lower():
+                msg = f'Authentication failed for {self.user}@{self.server}: {stderr}'
+                log.error(msg)
+                raise PsFTPAuthenticationError(msg)
+            msg = f'Failed to connect to {self.server}: {stderr}'
+            log.error(msg)
+            raise PsFTPConnectionError(msg)
+
+        self._connected = True
+        log.info(f'Successfully connected to {self.server}')
+
     def disconnect(self) -> None:
-        """Close the SFTP connection."""
-        if self._sftp:
-            self._sftp.close()
-        if self._client:
-            self._client.close()
+        """Mark the client as disconnected (no persistent session is kept)."""
+        self._connected = False
 
     # ========================================================================
     # Public Upload Method
@@ -192,15 +229,16 @@ class PsFTP:
         remote_path: str,
         max_upload_speed_kb: Optional[int] = None,
     ) -> None:
-        """Upload a file to the SFTP server.
+        """Upload a file to ``/<remote_dir>/<remote_path>``.
 
-        The file is first uploaded with a temporary name 'uploading.now' to avoid
-        partial file visibility. After successful upload and verification, it is
-        renamed to the target filename.
+        The file is first uploaded as 'uploading.now' in the target directory to avoid
+        partial file visibility. After the size is verified, any existing target is removed
+        and the temporary file is renamed (the OpenSSH sftp client has no atomic overwrite,
+        so there is a very short window without the target file).
 
         Args:
             local_path: Path to the local file to upload
-            remote_path: Destination path on the remote server
+            remote_path: Destination path, relative to the remote directory
             max_upload_speed_kb: Maximum upload speed in KB/s (default: None, unlimited)
 
         Raises:
@@ -213,69 +251,66 @@ class PsFTP:
         local_path = Path(local_path)
         self._validate_local_file(local_path)
         self._ensure_connected()
-        temp_remote_path = self._get_temp_upload_path(remote_path)
 
-        try:
-            # Create remote directory if it doesn't exist
-            remote_dir = Path(remote_path).parent.as_posix()
-            if remote_dir != '.' and not self._path_exists(remote_dir):
-                self._create_remote_directory(remote_dir)
+        rel = PurePosixPath(remote_path.lstrip('/'))
+        final_path = (PurePosixPath('/') / self.remote_dir / rel).as_posix()
+        target_dir = PurePosixPath(final_path).parent
+        temp_path = (target_dir / 'uploading.now').as_posix()
 
-            log.info(
-                f'Uploading {local_path} to temporary file {temp_remote_path} with maximum speed '
-                f'{max_upload_speed_kb or "unlimited"} KB/s'
-            )
+        speed_args: List[str] = []
+        if max_upload_speed_kb:
+            # sftp -l is in Kbit/s
+            speed_args = ['-l', str(int(max_upload_speed_kb) * 8)]
 
-            # Upload to temporary filename (this will overwrite if exists)
-            if max_upload_speed_kb:
-                self._throttled_upload(local_path, temp_remote_path, max_upload_speed_kb)
-            else:
-                self._sftp.put(str(local_path), temp_remote_path)
+        # A leading '-' makes sftp ignore the error (e.g. directory exists)
+        mkdirs = []
+        current = PurePosixPath('/')
+        for part in target_dir.parts[1:]:
+            current = current / part
+            mkdirs.append(f'-mkdir {_quote(current.as_posix())}')
 
-            self._verify_upload(local_path, temp_remote_path)
-            log.info('Upload verification successful')
+        log.info(
+            f'Uploading {local_path} to temporary file {temp_path} with maximum speed '
+            f'{max_upload_speed_kb or "unlimited"} KB/s'
+        )
+        self._run_checked(
+            [*mkdirs, f'put {_quote(str(local_path))} {_quote(temp_path)}'],
+            extra_args=speed_args,
+            error_cls=PsFTPUploadError,
+            what=f'upload of {local_path}',
+            timeout=self._upload_timeout(local_path, max_upload_speed_kb),
+        )
 
-            # Rename to final destination (posix_rename will overwrite if exists)
-            self._sftp.posix_rename(temp_remote_path, remote_path)
+        self._verify_upload(local_path, temp_path)
+        log.info('Upload verification successful')
 
-        # except (
-        #     PsFTPVerificationError,
-        #     PsFTPFileNotFoundError,
-        #     PsFTPInvalidPathError,
-        #     PsFTPNotConnectedError,
-        # ):
-        #     raise
-        except (socket.timeout, TimeoutError) as e:
-            # Handle timeout errors explicitly
-            msg = f'Upload timed out after {self.timeout}s while uploading {local_path}: {e}'
-            log.error(msg)
-            raise PsFTPUploadError(msg) from e
-        except (OSError, IOError) as e:
-            # Handle network/IO errors explicitly
-            msg = f'Network error during upload of {local_path}: {e}'
-            log.error(msg)
-            raise PsFTPUploadError(msg) from e
-        except paramiko.SSHException as e:
-            # Handle SSH/SFTP protocol errors explicitly
-            msg = f'SSH/SFTP error during upload of {local_path}: {e}'
-            log.error(msg)
-            raise PsFTPUploadError(msg) from e
-        except Exception as e:
-            # Clean up temporary file on any other failure
-            msg = f'Failed to upload {local_path}: {e}'
-            log.error(msg)
-            raise PsFTPUploadError(msg) from e
+        self._run_checked(
+            [f'-rm {_quote(final_path)}', f'rename {_quote(temp_path)} {_quote(final_path)}'],
+            error_cls=PsFTPUploadError,
+            what=f'rename to {final_path}',
+        )
 
-    def _validate_local_file(self, local_path: Path) -> None:
-        """Validate that local file exists and is a file.
-
-        Args:
-            local_path: Path to the local file
+    def delete_file(self, remote_path: str) -> None:
+        """Delete ``/<remote_dir>/<remote_path>`` from the server.
 
         Raises:
-            PsFTPFileNotFoundError: If the local file does not exist
-            PsFTPInvalidPathError: If the path is not a file
+            PsFTPNotConnectedError: If not connected to SFTP server
+            PsFTPError: If the removal fails
         """
+        self._ensure_connected()
+        rel = PurePosixPath(remote_path.lstrip('/'))
+        final_path = (PurePosixPath('/') / self.remote_dir / rel).as_posix()
+        self._run_checked(
+            [f'rm {_quote(final_path)}'],
+            error_cls=PsFTPError,
+            what=f'removal of {final_path}',
+        )
+
+    # ========================================================================
+    # Internals
+    # ========================================================================
+
+    def _validate_local_file(self, local_path: Path) -> None:
         if not local_path.exists():
             err_msg = f'Local file not found: {local_path}'
             raise PsFTPFileNotFoundError(err_msg)
@@ -284,173 +319,100 @@ class PsFTP:
             raise PsFTPInvalidPathError(err_msg)
 
     def _ensure_connected(self) -> None:
-        """Ensure SFTP connection is active.
-
-        Raises:
-            PsFTPNotConnectedError: If not connected to SFTP server
-        """
-        if self._sftp is None:
+        if not self._connected:
             err_msg = 'Not connected to SFTP server. Call connect() first.'
             raise PsFTPNotConnectedError(err_msg)
 
-    def _get_temp_upload_path(self, remote_path: str) -> str:
-        """Calculate temporary upload path.
+    def _upload_timeout(self, local_path: Path, max_speed_kb: Optional[int]) -> float:
+        """Overall timeout: connection timeout + 2x expected transfer time."""
+        size_kb = local_path.stat().st_size / 1024
+        speed = max_speed_kb or 10  # assume at least 10 KB/s when unthrottled
+        return self.timeout + 2 * size_kb / speed
 
-        Args:
-            remote_path: Final destination path on the remote server
+    def _base_command(self, extra_args: Optional[List[str]] = None) -> List[str]:
+        return [
+            SFTP_BINARY,
+            '-b',
+            '-',
+            '-i',
+            self.key_file,
+            '-P',
+            str(self.port),
+            '-o',
+            'BatchMode=yes',
+            '-o',
+            'IdentitiesOnly=yes',
+            '-o',
+            'StrictHostKeyChecking=accept-new',
+            '-o',
+            f'ConnectTimeout={self.timeout}',
+            '-o',
+            'ServerAliveInterval=30',
+            '-o',
+            'ServerAliveCountMax=3',
+            *(extra_args or []),
+            f'{self.user}@{self.server}',
+        ]
 
-        Returns:
-            Temporary upload path (same directory, name 'uploading.now')
-        """
-        remote_dir = Path(remote_path).parent.as_posix()
-        return f'{remote_dir}/uploading.now' if remote_dir != '.' else 'uploading.now'
-
-    def _throttled_upload(self, local_path: Path, remote_path: str, max_speed_kb: int) -> None:
-        """Upload a file with bandwidth throttling.
-
-        Args:
-            local_path: Path to the local file
-            remote_path: Destination path on the remote server
-            max_speed_kb: Maximum upload speed in kilobytes per second
-
-        Raises:
-            PsFTPNotConnectedError: If not connected to SFTP server
-            PsFTPUploadError: For upload errors including timeout
-            socket.timeout: If socket timeout occurs during write
-        """
-        chunk_size = 32768  # 32 KB chunks
-        max_bytes_per_sec = max_speed_kb * 1024
-        chunks_per_sec = max(1, max_bytes_per_sec // chunk_size)
-        sleep_time = 1.0 / chunks_per_sec if chunks_per_sec > 0 else 0
-
-        log.debug(
-            f'Throttled upload: {max_speed_kb} KB/s, chunk size: {chunk_size} bytes, '
-            f'sleep time: {sleep_time:.4f}s per chunk'
+    def _run_batch(
+        self,
+        commands: List[str],
+        extra_args: Optional[List[str]] = None,
+        timeout: Optional[float] = None,
+    ) -> 'subprocess.CompletedProcess[str]':
+        return subprocess.run(  # noqa: S603
+            self._base_command(extra_args),
+            input='\n'.join(commands) + '\n',
+            capture_output=True,
+            text=True,
+            timeout=timeout if timeout is not None else self.timeout * 3,
+            check=False,
         )
 
+    def _run_checked(
+        self,
+        commands: List[str],
+        error_cls: type,
+        what: str,
+        extra_args: Optional[List[str]] = None,
+        timeout: Optional[float] = None,
+    ) -> 'subprocess.CompletedProcess[str]':
         try:
-            with local_path.open('rb') as local_file, self._sftp.file(
-                remote_path, 'wb'
-            ) as remote_file:
-                bytes_transferred = 0
-                start_time = time.time()
-
-                while True:
-                    chunk_start = time.time()
-                    chunk = local_file.read(chunk_size)
-                    if not chunk:
-                        break
-
-                    remote_file.write(chunk)
-                    bytes_transferred += len(chunk)
-
-                    # Calculate actual speed and sleep if needed
-                    if sleep_time > 0:
-                        elapsed = time.time() - chunk_start
-                        if elapsed < sleep_time:
-                            time.sleep(sleep_time - elapsed)
-
-                elapsed_time = time.time() - start_time
-                if elapsed_time > 0:
-                    actual_speed = (bytes_transferred / 1024) / elapsed_time
-                    log.debug(
-                        f'Upload completed: {bytes_transferred / 1024:.2f} KB in '
-                        f'{elapsed_time:.2f}s (avg: {actual_speed:.2f} KB/s)'
-                    )
-        except (socket.timeout, TimeoutError) as e:
-            msg = f'Timeout during throttled upload: {e}'
+            result = self._run_batch(commands, extra_args, timeout)
+        except subprocess.TimeoutExpired as e:
+            msg = f'Timeout during {what}: {e}'
             log.error(msg)
-            raise
-        except (OSError, IOError) as e:
-            msg = f'IO error during throttled upload: {e}'
+            raise error_cls(msg) from e
+        except OSError as e:
+            msg = f'Failed to run {SFTP_BINARY} for {what}: {e}'
             log.error(msg)
-            raise
-
-    def _verify_upload(self, local_path: Path, remote_path: str) -> bool:
-        """Verify that the uploaded file size matches the local file.
-
-        Args:
-            local_path: Path to the local file
-            remote_path: Path to the remote file
-
-        Returns:
-            True if verification succeeds
-
-        Raises:
-            PsFTPNotConnectedError: If not connected to SFTP server
-            PsFTPVerificationError: If verification fails
-        """
-        if self._sftp is None:
-            msg = 'Not connected to SFTP server.'
-            raise PsFTPNotConnectedError(msg)
-
-        try:
-            remote_stat = self._sftp.stat(remote_path)
-            remote_size = remote_stat.st_size
-            local_size = local_path.stat().st_size
-
-            if local_size != remote_size:
-                msg = f'File size mismatch: local={local_size}, remote={remote_size}'
-                log.error(msg)
-                raise PsFTPVerificationError(msg)
-
-        except PsFTPVerificationError:
-            # Re-raise verification errors as-is
-            raise
-        except (socket.timeout, TimeoutError) as e:
-            msg = f'Timeout during verification after {self.timeout}s: {e}'
+            raise error_cls(msg) from e
+        if result.returncode != 0:
+            msg = f'Failed {what}: {result.stderr.strip() or result.stdout.strip()}'
             log.error(msg)
-            raise PsFTPVerificationError(msg) from e
-        except (OSError, IOError) as e:
-            msg = f'Network error during verification: {e}'
+            raise error_cls(msg)
+        return result
+
+    def _verify_upload(self, local_path: Path, remote_path: str) -> None:
+        """Verify that the remote file size matches the local file."""
+        result = self._run_checked(
+            [f'ls -ln {_quote(remote_path)}'],
+            error_cls=PsFTPVerificationError,
+            what=f'verification of {remote_path}',
+        )
+        local_size = local_path.stat().st_size
+        remote_size = None
+        for line in result.stdout.splitlines():
+            fields = line.split()
+            # "-rw-r--r-- 1 uid gid size Mon DD HH:MM name"
+            if len(fields) >= 9 and fields[0].startswith('-') and fields[4].isdigit():
+                remote_size = int(fields[4])
+                break
+        if remote_size is None:
+            msg = f'Could not determine remote size of {remote_path}: {result.stdout.strip()}'
             log.error(msg)
-            raise PsFTPVerificationError(msg) from e
-        except Exception as e:
-            msg = f'Upload verification failed: {e}'
+            raise PsFTPVerificationError(msg)
+        if local_size != remote_size:
+            msg = f'File size mismatch: local={local_size}, remote={remote_size}'
             log.error(msg)
-            raise PsFTPVerificationError(msg) from e
-        else:
-            return True
-
-    def _path_exists(self, path: str) -> bool:
-        """Check if a path exists on the remote server.
-
-        Args:
-            path: Path to check on the remote server
-
-        Returns:
-            True if path exists, False otherwise
-        """
-        try:
-            self._sftp.stat(path)
-        except FileNotFoundError:
-            return False
-        else:
-            return True
-
-    def _create_remote_directory(self, remote_path: str) -> None:
-        """Create directory and all parent directories on remote server.
-
-        Args:
-            remote_path: Path to the directory to create
-
-        Raises:
-            PsFTPUploadError: If directory creation fails
-        """
-        is_absolute = remote_path.startswith('/')
-        parts = [p for p in remote_path.split('/') if p]
-        current_path = '/' if is_absolute else ''
-
-        for part in parts:
-            if current_path and not current_path.endswith('/'):
-                current_path += '/'
-            current_path += part
-
-            if not self._path_exists(current_path):
-                try:
-                    self._sftp.mkdir(current_path)
-                    log.info(f'Created directory: {current_path}')
-                except Exception as e:
-                    msg = f'Failed to create directory {current_path}: {e}'
-                    log.error(msg)
-                    raise PsFTPUploadError(msg) from e
+            raise PsFTPVerificationError(msg)

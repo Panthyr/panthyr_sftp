@@ -11,6 +11,7 @@ from p_sftp.__version__ import __version__
 from p_sftp.p_sftp import (
     PsFTP,
     PsFTPAuthenticationError,
+    PsFTPConfigError,
     PsFTPConnectionError,
     PsFTPError,
     PsFTPFileNotFoundError,
@@ -24,6 +25,7 @@ __all__ = [
     '__version__',
     'PsFTP',
     'PsFTPError',
+    'PsFTPConfigError',
     'PsFTPConnectionError',
     'PsFTPAuthenticationError',
     'PsFTPNotConnectedError',

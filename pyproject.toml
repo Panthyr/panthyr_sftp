@@ -5,7 +5,7 @@ name = 'p_sftp'
 description = 'SFTP library for the Panthyr pan-tilt hyperspectral radiometer.'
 readme = 'README.md'
 license = { file = 'LICENSE' }
-requires-python = ">=3.7"
+requires-python = ">=3.11"
 authors = [
     { name = 'Dieter Vansteenwegen', email = 'github@vansteenwegen.org' },
 ]
@@ -22,9 +22,10 @@ classifiers = [
 
 keywords = ['Panthyr', 'SFTP']
 dynamic = ["version"]
-dependencies = [
-    "paramiko>=3.0.0",
-]
+dependencies = []
+
+[project.scripts]
+test_sftp = 'p_sftp.test_sftp:main'
 
 [project.urls]
 Homepage = 'https://boxfish.be'
@@ -46,18 +47,18 @@ file = "src/p_sftp/__version__.py"
 
 [tool.uv]
 dev-dependencies = [
-    # "p_sftp",
-    # "pre-commit>=4.1.0",
-    # "deptry>=0.22.0",
-    # "ruff>=0.9.6",
-    # "vulture>=2.14",
-    # "sphinx>=8.2.1",
-    # "sphinx-rtd-theme>=3.0.2",
-    # "sphinxcontrib-napoleon>=0.7",
-    # "recommonmark>=0.7.1",
-    # "sphinx-copybutton>=0.5.2",
-    # "sphinx-toggleprompt>=0.6.0",
-    # "myst-parser>=4.0.1",
+    "p_sftp",
+    "pre-commit>=4.1.0",
+    "deptry>=0.22.0",
+    "ruff>=0.9.6",
+    "vulture>=2.14",
+    "sphinx>=8.2.1",
+    "sphinx-rtd-theme>=3.0.2",
+    "sphinxcontrib-napoleon>=0.7",
+    "recommonmark>=0.7.1",
+    "sphinx-copybutton>=0.5.2",
+    "sphinx-toggleprompt>=0.6.0",
+    "myst-parser>=4.0.1",
 ]
 
 
@@ -91,7 +92,7 @@ exclude = [
     "venv",
     "docs",
 ]
-target-version = "py37"
+target-version = "py311"
 line-length = 100
 indent-width = 4
 
