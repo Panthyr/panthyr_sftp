@@ -32,3 +32,8 @@ with PsFTP() as client:  # explicit arguments override the env file
 ```
 
 Throttling (`sftp -l`) is only applied when `max_upload_speed_kb` is set.
+
+## Testing the configuration
+
+Run `test_sftp` to log in with the configured key, upload a 50 KB random file
+(`test_upload`), report success or failure, and remove the file again.

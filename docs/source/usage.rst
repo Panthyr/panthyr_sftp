@@ -2,404 +2,163 @@
 Panthyr SFTP Library Usage
 ===============================
 
+The library uploads files with the system OpenSSH ``sftp`` client, using SSH key authentication.
+It has no Python dependencies. Every operation runs in a new ``sftp`` process in batch mode.
 
+Configuration
+-------------
+
+Settings are read from an env file, by default ``/home/panthyr/data/sftp.env``:
+
+.. code-block:: text
+
+    SFTP_SERVER=ftp.example.org
+    SFTP_PORT=22
+    SFTP_USER=user
+    SFTP_KEY_FILE=/home/panthyr/data/sftp_key
+    SFTP_REMOTE_DIR=TBBE
+
+``SFTP_PORT`` is optional (default 22), all other keys are required. Comments (``#``), an
+``export`` prefix and quoted values are supported.
+
+Any setting can be overridden with a constructor argument. A different env file can be given with
+``env_file``.
 
 Basic Usage
 -----------
 
-Simple File Upload
-~~~~~~~~~~~~~~~~~~
-
-The simplest way to upload a file is using a context manager:
-
 .. code-block:: python
 
-    from p_sftp import PSFTP
+    from p_sftp import PsFTP
 
-    # Upload a file with automatic connection and verification
-    with PSFTP('sftp.example.com', 'username', 'password') as client:
-        client.upload_file('local_file.txt', '/remote/path/file.txt')
+    with PsFTP() as client:
+        # Uploads to /TBBE/2026/file.csv on the server
+        client.upload_file('/data/file.csv', '2026/file.csv')
 
-The context manager automatically:
+Remote paths are relative to ``/<SFTP_REMOTE_DIR>/``. Missing directories are created.
 
-* Connects to the SFTP server
-* Uploads the file
-* Verifies the upload (file size check)
-* Closes the connection when done
+The context manager calls ``connect()`` on entry, which checks that the ``sftp`` binary and key
+file exist and that the server accepts the key. ``disconnect()`` is called on exit.
 
 Manual Connection Management
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-You can also manage connections manually if needed:
-
 .. code-block:: python
 
-    from p_sftp import PSFTP
+    from p_sftp import PsFTP
 
-    # Create client
-    client = PSFTP('sftp.example.com', 'username', 'password', port=22)
-
+    client = PsFTP(server='ftp.example.org', user='user', key_file='/path/to/key',
+                   remote_dir='TBBE', port=2222)
+    client.connect()
     try:
-        # Connect to server
-        client.connect()
-
-        # Upload file
-        client.upload_file('local_file.txt', '/remote/path/file.txt')
-
+        client.upload_file('file.txt', 'file.txt')
     finally:
-        # Always disconnect when done
         client.disconnect()
 
-Advanced Usage
---------------
+Limiting the Upload Speed
+~~~~~~~~~~~~~~~~~~~~~~~~~
 
-Custom Port
-~~~~~~~~~~~
-
-Specify a non-standard SFTP port:
+Throttling (``sftp -l``) is only applied when ``max_upload_speed_kb`` is set:
 
 .. code-block:: python
 
-    from p_sftp import PSFTP
+    with PsFTP() as client:
+        client.upload_file('file.csv', 'file.csv', max_upload_speed_kb=100)
 
-    # Connect to server on port 2222
-    with PSFTP('sftp.example.com', 'username', 'password', port=2222) as client:
-        client.upload_file('file.txt', '/remote/file.txt')
-
-Upload Without Verification
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-
-By default, uploads are verified by comparing file sizes. You can disable this:
-
-.. code-block:: python
-
-    from p_sftp import PSFTP
-
-    with PSFTP('sftp.example.com', 'username', 'password') as client:
-        # Upload without verification (faster but not recommended)
-        client.upload_file('file.txt', '/remote/file.txt', verify=False)
-
-.. warning::
-    Disabling verification is not recommended as it may result in incomplete or corrupted uploads
-    going undetected.
-
-Reusing Connections
+How an Upload Works
 ~~~~~~~~~~~~~~~~~~~
 
-Upload multiple files using a single connection:
+1. The file is uploaded as ``uploading.now`` in the target directory, so partial files are never
+   visible under the final name.
+2. The remote size is compared with the local size. A mismatch raises
+   ``PsFTPVerificationError``.
+3. Any existing target is removed and the temporary file is renamed. The OpenSSH client has no
+   atomic overwrite, so there is a very short window without the target file.
 
-.. code-block:: python
-
-    from p_sftp import PSFTP
-
-    files_to_upload = [
-        ('data1.csv', '/remote/data/data1.csv'),
-        ('data2.csv', '/remote/data/data2.csv'),
-        ('data3.csv', '/remote/data/data3.csv'),
-    ]
-
-    with PSFTP('sftp.example.com', 'username', 'password') as client:
-        for local_file, remote_path in files_to_upload:
-            client.upload_file(local_file, remote_path)
-            print(f'Uploaded {local_file}')
-
-Using Path Objects
-~~~~~~~~~~~~~~~~~~
-
-The library accepts both strings and ``pathlib.Path`` objects:
-
-.. code-block:: python
-
-    from pathlib import Path
-    from p_sftp import PSFTP
-
-    local_file = Path('data') / 'measurements.csv'
-
-    with PSFTP('sftp.example.com', 'username', 'password') as client:
-        client.upload_file(local_file, '/remote/measurements.csv')
-
-Upload Verification
--------------------
-
-How Verification Works
+Deleting a Remote File
 ~~~~~~~~~~~~~~~~~~~~~~
 
-By default, after each upload, the library verifies the upload was successful by:
-
-1. **File Size Check**: Compares the size of the local file with the uploaded remote file
-2. If sizes don't match, a ``RuntimeError`` is raised
-
-This verification happens automatically and provides confidence that your files were uploaded
-correctly.
-
 .. code-block:: python
 
-    from p_sftp import PSFTP
+    with PsFTP() as client:
+        client.delete_file('2026/file.csv')
 
-    with PSFTP('sftp.example.com', 'username', 'password') as client:
-        # Verification happens automatically
-        client.upload_file('important_data.csv', '/backup/data.csv')
-        # If you reach this point, the upload was verified successfully
+Testing the Configuration
+-------------------------
 
-Disabling Verification
-~~~~~~~~~~~~~~~~~~~~~~
+The ``test_sftp`` command checks the configuration in the default env file. It logs in with the
+configured key, uploads a 50 KB file with random data named ``test_upload``, reports the result and
+removes the file again:
 
-For trusted networks or when speed is critical:
+.. code-block:: console
 
-.. code-block:: python
+    $ test_sftp
+    Connecting to user@ftp.example.org:22 ...
+    Uploading test_upload (51200 bytes) ...
+    SUCCESS: upload completed and verified.
+    Removed test_upload from the server.
 
-    from p_sftp import PSFTP
-
-    with PSFTP('sftp.example.com', 'username', 'password') as client:
-        client.upload_file('file.txt', '/remote/file.txt', verify=False)
+The exit code is 0 on success and 1 on failure (including a failed removal).
 
 Error Handling
 --------------
 
-Connection Errors
-~~~~~~~~~~~~~~~~~
+All exceptions derive from ``PsFTPError``:
 
-Handle authentication and connection errors:
-
-.. code-block:: python
-
-    from p_sftp import PSFTP
-    import paramiko
-
-    try:
-        with PSFTP('sftp.example.com', 'username', 'wrong_password') as client:
-            client.upload_file('file.txt', '/remote/file.txt')
-    except paramiko.AuthenticationException:
-        print('Authentication failed: Invalid credentials')
-    except paramiko.SSHException as e:
-        print(f'SSH error: {e}')
-    except Exception as e:
-        print(f'Connection error: {e}')
-
-Upload Errors
-~~~~~~~~~~~~~
-
-Handle file not found and upload errors:
+==================================  =============================================================
+Exception                           Raised when
+==================================  =============================================================
+``PsFTPConfigError``                Env file unreadable, setting missing or invalid, ``sftp``
+                                    binary or key file not found
+``PsFTPConnectionError``            Server unreachable, timeout
+``PsFTPAuthenticationError``        The server rejects the key
+``PsFTPNotConnectedError``          Upload or delete without calling ``connect()``
+``PsFTPFileNotFoundError``          The local file does not exist
+``PsFTPInvalidPathError``           The local path is not a file
+``PsFTPUploadError``                The upload or rename fails
+``PsFTPVerificationError``          The remote size cannot be determined or does not match
+==================================  =============================================================
 
 .. code-block:: python
 
-    from p_sftp import PSFTP
+    from p_sftp import PsFTP, PsFTPAuthenticationError, PsFTPError
 
     try:
-        with PSFTP('sftp.example.com', 'username', 'password') as client:
-            client.upload_file('nonexistent.txt', '/remote/file.txt')
-    except FileNotFoundError as e:
-        print(f'Local file not found: {e}')
-    except RuntimeError as e:
-        print(f'Upload verification failed: {e}')
-    except Exception as e:
-        print(f'Upload error: {e}')
+        with PsFTP() as client:
+            client.upload_file('file.txt', 'file.txt')
+    except PsFTPAuthenticationError as e:
+        print(f'Key rejected: {e}')
+    except PsFTPError as e:
+        print(f'SFTP error: {e}')
 
 Logging
 -------
 
-The library uses Python's standard logging module. Enable logging to see detailed information:
+The library uses the standard ``logging`` module (logger ``p_sftp.p_sftp``):
 
 .. code-block:: python
 
     import logging
-    from p_sftp import PSFTP
 
-    # Configure logging
-    logging.basicConfig(
-        level=logging.INFO,
-        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-    )
-
-    # Now you'll see detailed logs
-    with PSFTP('sftp.example.com', 'username', 'password') as client:
-        client.upload_file('file.txt', '/remote/file.txt')
-
-Log Levels
-~~~~~~~~~~
-
-* ``DEBUG``: Detailed connection information, file sizes, verification details
-* ``INFO``: Connection status, upload progress, verification results
-* ``ERROR``: Connection failures, upload errors, verification failures
-
-Example output with ``INFO`` level:
-
-.. code-block:: text
-
-    2025-10-03 10:30:15 - p_sftp.p_sftp - INFO - Connecting to SFTP server sftp.example.com:22
-    2025-10-03 10:30:16 - p_sftp.p_sftp - INFO - Successfully connected to sftp.example.com
-    2025-10-03 10:30:16 - p_sftp.p_sftp - INFO - Uploading file.txt to /remote/file.txt
-    2025-10-03 10:30:17 - p_sftp.p_sftp - INFO - Successfully uploaded file.txt
-    2025-10-03 10:30:17 - p_sftp.p_sftp - INFO - Verifying upload...
-    2025-10-03 10:30:17 - p_sftp.p_sftp - INFO - File size verification passed
-    2025-10-03 10:30:17 - p_sftp.p_sftp - INFO - Upload verification successful
+    logging.basicConfig(level=logging.INFO)
 
 API Reference
 -------------
 
-PSFTP Class
-~~~~~~~~~~~
+``PsFTP(server=None, user=None, key_file=None, port=None, timeout=20, remote_dir=None, env_file='/home/panthyr/data/sftp.env')``
+    Arguments left at ``None`` are read from the env file (``SFTP_SERVER``, ``SFTP_USER``,
+    ``SFTP_KEY_FILE``, ``SFTP_PORT``, ``SFTP_REMOTE_DIR``). ``timeout`` (seconds) is used for
+    connecting and for each ``sftp`` operation.
 
-.. code-block:: python
+``connect()``
+    Check that the server is reachable and the key is accepted.
 
-    class PSFTP(server, user, password, port=22)
+``disconnect()``
+    Mark the client as disconnected. No persistent session is kept.
 
-Parameters:
-    * ``server`` (str): The hostname or IP address of the SFTP server
-    * ``user`` (str): The username for authentication
-    * ``password`` (str): The password for authentication
-    * ``port`` (int, optional): The port number for the SFTP server (default: 22)
+``upload_file(local_path, remote_path, max_upload_speed_kb=None)``
+    Upload ``local_path`` (``str`` or ``Path``) to ``/<remote_dir>/<remote_path>`` and verify the
+    size.
 
-Methods
-~~~~~~~
-
-connect()
-^^^^^^^^^
-
-Establish connection to the SFTP server.
-
-.. code-block:: python
-
-    client.connect()
-
-Raises:
-    * ``paramiko.AuthenticationException``: If authentication fails
-    * ``paramiko.SSHException``: If there is an SSH-related error
-    * ``Exception``: For other connection errors
-
-disconnect()
-^^^^^^^^^^^^
-
-Close the SFTP connection.
-
-.. code-block:: python
-
-    client.disconnect()
-
-upload_file()
-^^^^^^^^^^^^^
-
-Upload a file to the SFTP server.
-
-.. code-block:: python
-
-    client.upload_file(local_path, remote_path, auto_connect=True, verify=True)
-
-Parameters:
-    * ``local_path`` (str or Path): Path to the local file to upload
-    * ``remote_path`` (str): Destination path on the remote server
-    * ``auto_connect`` (bool, optional): Automatically connect if not already connected (default: True)
-    * ``verify`` (bool, optional): Verify the upload after completion (default: True)
-
-Raises:
-    * ``FileNotFoundError``: If the local file does not exist
-    * ``ValueError``: If the path is not a file
-    * ``RuntimeError``: If upload verification fails or not connected
-    * ``Exception``: For other upload errors
-
-Best Practices
---------------
-
-1. **Always use context managers** when possible for automatic cleanup:
-
-   .. code-block:: python
-
-       with PSFTP(server, user, password) as client:
-           client.upload_file(local, remote)
-
-2. **Keep verification enabled** unless you have a specific reason to disable it
-
-3. **Use logging** during development and debugging to understand what's happening
-
-4. **Handle exceptions** appropriately for production code:
-
-   .. code-block:: python
-
-       try:
-           with PSFTP(server, user, password) as client:
-               client.upload_file(local, remote)
-       except Exception as e:
-           logger.error(f'Upload failed: {e}')
-           # Handle error appropriately
-
-5. **Reuse connections** when uploading multiple files to improve performance
-
-6. **Use environment variables** for credentials instead of hardcoding them:
-
-   .. code-block:: python
-
-       import os
-       from p_sftp import PSFTP
-
-       server = os.environ.get('SFTP_SERVER')
-       user = os.environ.get('SFTP_USER')
-       password = os.environ.get('SFTP_PASSWORD')
-
-       with PSFTP(server, user, password) as client:
-           client.upload_file('file.txt', '/remote/file.txt')
-
-Complete Example
-----------------
-
-Here's a complete example showing best practices:
-
-.. code-block:: python
-
-    import logging
-    import os
-    from pathlib import Path
-    from p_sftp import PSFTP
-
-    # Configure logging
-    logging.basicConfig(
-        level=logging.INFO,
-        format='%(asctime)s - %(levelname)s - %(message)s'
-    )
-    logger = logging.getLogger(__name__)
-
-    def upload_data_files():
-        """Upload all data files to the SFTP server."""
-        # Get credentials from environment
-        server = os.environ.get('SFTP_SERVER', 'sftp.example.com')
-        user = os.environ.get('SFTP_USER')
-        password = os.environ.get('SFTP_PASSWORD')
-
-        if not user or not password:
-            logger.error('SFTP credentials not found in environment')
-            return False
-
-        # Define files to upload
-        data_dir = Path('data')
-        files = [
-            (data_dir / 'measurements_2025.csv', '/backup/measurements_2025.csv'),
-            (data_dir / 'calibration.json', '/backup/calibration.json'),
-            (data_dir / 'metadata.txt', '/backup/metadata.txt'),
-        ]
-
-        try:
-            with PSFTP(server, user, password) as client:
-                logger.info(f'Connected to {server}')
-
-                for local_file, remote_path in files:
-                    if not local_file.exists():
-                        logger.warning(f'Skipping {local_file}: file not found')
-                        continue
-
-                    try:
-                        client.upload_file(local_file, remote_path)
-                        logger.info(f'Successfully uploaded {local_file.name}')
-                    except Exception as e:
-                        logger.error(f'Failed to upload {local_file.name}: {e}')
-                        # Continue with next file
-                        continue
-
-                logger.info('Upload batch completed')
-                return True
-
-        except Exception as e:
-            logger.error(f'SFTP connection error: {e}')
-            return False
-
-    if __name__ == '__main__':
-        success = upload_data_files()
-        exit(0 if success else 1)
+``delete_file(remote_path)``
+    Delete ``/<remote_dir>/<remote_path>`` from the server.

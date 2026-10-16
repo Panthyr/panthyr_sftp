@@ -1,5 +1,6 @@
 """CLI entry point that tests the SFTP configuration by uploading and removing a file."""
 
+import logging
 import os
 import sys
 import tempfile
@@ -20,7 +21,7 @@ def run() -> int:
         uploaded = False
         client = None
         try:
-            client = PsFTP()
+            client = PsFTP(verbose=True)
             print(f'Connecting to {client.user}@{client.server}:{client.port} ...')
             client.connect()
             print(f'Uploading {TEST_FILE_NAME} ({TEST_FILE_SIZE} bytes) ...')
@@ -43,6 +44,7 @@ def run() -> int:
 
 
 def main() -> None:
+    logging.basicConfig(level=logging.DEBUG, format='%(levelname)s %(name)s: %(message)s')
     sys.exit(run())
 
 

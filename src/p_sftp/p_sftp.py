@@ -124,6 +124,7 @@ class PsFTP:
         timeout: int = 20,
         remote_dir: Optional[str] = None,
         env_file: Union[str, Path] = DEFAULT_ENV_FILE,
+        verbose: bool = False,
     ) -> None:
         """Initialize PsFTP client.
 
@@ -135,6 +136,7 @@ class PsFTP:
             timeout: Connection timeout in seconds, also used per sftp operation (default: 20)
             remote_dir: Directory in the server root to upload into (default: SFTP_REMOTE_DIR)
             env_file: Path to the env file
+            verbose: Run sftp with maximum verbosity (-vvv) and log its output at DEBUG level
 
         Raises:
             PsFTPConfigError: If a required setting is missing or invalid
@@ -153,6 +155,7 @@ class PsFTP:
             msg = f'Invalid SFTP_PORT: {env.get("SFTP_PORT")}'
             raise PsFTPConfigError(msg) from e
         self.timeout = timeout
+        self.verbose = verbose
         self._connected = False
 
     @staticmethod
@@ -350,6 +353,7 @@ class PsFTP:
             'ServerAliveInterval=30',
             '-o',
             'ServerAliveCountMax=3',
+            *(['-vvv'] if self.verbose else []),
             *(extra_args or []),
             f'{self.user}@{self.server}',
         ]
@@ -360,7 +364,7 @@ class PsFTP:
         extra_args: Optional[List[str]] = None,
         timeout: Optional[float] = None,
     ) -> 'subprocess.CompletedProcess[str]':
-        return subprocess.run(  # noqa: S603
+        result = subprocess.run(  # noqa: S603
             self._base_command(extra_args),
             input='\n'.join(commands) + '\n',
             capture_output=True,
@@ -368,6 +372,11 @@ class PsFTP:
             timeout=timeout if timeout is not None else self.timeout * 3,
             check=False,
         )
+        if self.verbose:
+            log.debug(f'sftp commands: {commands}')
+            log.debug(f'sftp stdout:\n{result.stdout}')
+            log.debug(f'sftp stderr:\n{result.stderr}')
+        return result
 
     def _run_checked(
         self,

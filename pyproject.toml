@@ -45,8 +45,8 @@ source = "versioningit"
 [tool.versioningit.write]
 file = "src/p_sftp/__version__.py"
 
-[tool.uv]
-dev-dependencies = [
+[dependency-groups]
+dev = [
     "p_sftp",
     "pre-commit>=4.1.0",
     "deptry>=0.22.0",
@@ -61,7 +61,7 @@ dev-dependencies = [
     "myst-parser>=4.0.1",
 ]
 
-
+[tool.uv]
 package = true
 
 [tool.uv.pip]
