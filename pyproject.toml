@@ -70,6 +70,13 @@ generate-hashes = true
 [tool.uv.sources]
 p_sftp = { workspace = true }
 
+[tool.pymarkdown]
+plugins.md013.line_length = 100
+plugins.md013.code_block_line_length = 100
+plugins.md013.heading_line_length = 100
+plugins.md013.table_line_length = 100
+plugins.md013.strict = true
+
 [tool.setuptools.packages.find]
 where = ['src'] # list of folders that contain the packages (['.'] by default)
 include = [

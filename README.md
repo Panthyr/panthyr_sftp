@@ -27,9 +27,14 @@ SFTP_REMOTE_DIR=TBBE
 from p_sftp import PsFTP
 
 with PsFTP() as client:  # explicit arguments override the env file
-    # uploads to /TBBE/2026/file.csv
-    client.upload_file('/data/file.csv', '2026/file.csv', max_upload_speed_kb=100)
+    # with SFTP_REMOTE_DIR=TBBE in 2026: /TBBE/2026/abc.db
+    client.upload_file('/data/abc.db', max_upload_speed_kb=100)
 ```
+
+`SFTP_REMOTE_DIR` is the station directory. The current local year is added automatically;
+uploads attempt to create missing directories and use the local filename on the server.
+Paths passed to `delete_file` are relative to the year directory. The year is determined
+separately for each upload or deletion.
 
 Throttling (`sftp -l`) is only applied when `max_upload_speed_kb` is set.
 

@@ -32,10 +32,13 @@ Basic Usage
     from p_sftp import PsFTP
 
     with PsFTP() as client:
-        # Uploads to /TBBE/2026/file.csv on the server
-        client.upload_file('/data/file.csv', '2026/file.csv')
+        # With SFTP_REMOTE_DIR=TBBE in 2026: /TBBE/2026/abc.db
+        client.upload_file('/data/abc.db')
 
-Remote paths are relative to ``/<SFTP_REMOTE_DIR>/``. Missing directories are created.
+``SFTP_REMOTE_DIR`` is the station directory. Uploads use the local filename in
+``/<SFTP_REMOTE_DIR>/<current local year>/`` and attempt to create missing directories.
+Paths passed to ``delete_file`` are relative to the year directory. The local year is determined
+separately for each upload or deletion.
 
 The context manager calls ``connect()`` on entry, which checks that the ``sftp`` binary and key
 file exist and that the server accepts the key. ``disconnect()`` is called on exit.
@@ -51,7 +54,7 @@ Manual Connection Management
                    remote_dir='TBBE', port=2222)
     client.connect()
     try:
-        client.upload_file('file.txt', 'file.txt')
+        client.upload_file('file.txt')
     finally:
         client.disconnect()
 
@@ -63,7 +66,7 @@ Throttling (``sftp -l``) is only applied when ``max_upload_speed_kb`` is set:
 .. code-block:: python
 
     with PsFTP() as client:
-        client.upload_file('file.csv', 'file.csv', max_upload_speed_kb=100)
+        client.upload_file('file.csv', max_upload_speed_kb=100)
 
 How an Upload Works
 ~~~~~~~~~~~~~~~~~~~
@@ -81,7 +84,7 @@ Deleting a Remote File
 .. code-block:: python
 
     with PsFTP() as client:
-        client.delete_file('2026/file.csv')
+        client.delete_file('file.csv')
 
 Testing the Configuration
 -------------------------
@@ -125,7 +128,7 @@ Exception                           Raised when
 
     try:
         with PsFTP() as client:
-            client.upload_file('file.txt', 'file.txt')
+            client.upload_file('file.txt')
     except PsFTPAuthenticationError as e:
         print(f'Key rejected: {e}')
     except PsFTPError as e:
@@ -156,9 +159,9 @@ API Reference
 ``disconnect()``
     Mark the client as disconnected. No persistent session is kept.
 
-``upload_file(local_path, remote_path, max_upload_speed_kb=None)``
-    Upload ``local_path`` (``str`` or ``Path``) to ``/<remote_dir>/<remote_path>`` and verify the
-    size.
+``upload_file(local_path, max_upload_speed_kb=None)``
+    Upload ``local_path`` (``str`` or ``Path``) to
+    ``/<remote_dir>/<current local year>/<local filename>`` and verify the size.
 
 ``delete_file(remote_path)``
-    Delete ``/<remote_dir>/<remote_path>`` from the server.
+    Delete ``/<remote_dir>/<current local year>/<remote_path>`` from the server.

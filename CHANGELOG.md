@@ -2,9 +2,9 @@
 
 ## Not released yet
 
-- Replace paramiko with the system OpenSSH `sftp` client (SSH key auth only, no dependencies)
-- Read server, port, user, key file and remote dir from `/home/panthyr/data/sftp.env`
-- `password` argument removed; requires Python >= 3.11
+- refactor: Replace paramiko with system OpenSSH `sftp` client (SSH key auth only, no dependencies)
+- feat: Read server, port, user, key file and remote dir from `.env file`
+- feat: Restore pFTP library functionality to save to year subfolder
 
 ## v0.1.0
 

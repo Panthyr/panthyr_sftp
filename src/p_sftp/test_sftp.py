@@ -25,7 +25,7 @@ def run() -> int:
             print(f'Connecting to {client.user}@{client.server}:{client.port} ...')
             client.connect()
             print(f'Uploading {TEST_FILE_NAME} ({TEST_FILE_SIZE} bytes) ...')
-            client.upload_file(local_file, TEST_FILE_NAME)
+            client.upload_file(local_file)
             uploaded = True
             print('SUCCESS: upload completed and verified.')
             result = 0

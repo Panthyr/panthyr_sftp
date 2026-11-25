@@ -8,6 +8,7 @@ __project_link__ = 'https://waterhypernet.org/equipment/'
 import logging
 import shutil
 import subprocess
+from datetime import datetime
 from pathlib import Path, PurePosixPath
 from typing import Dict, List, Optional, Union
 
@@ -81,7 +82,8 @@ def _read_env_file(env_file: Union[str, Path]) -> Dict[str, str]:
             line = line[len('export ') :].lstrip()
         key, _, value = line.partition('=')
         value = value.strip()
-        if len(value) >= 2 and value[0] == value[-1] and value[0] in ('"', "'"):
+        # Check if the value is quoted and remove single/double quotes if needed
+        if len(value) >= 2 and value[0] in ('"', "'") and value[0] == value[-1]:
             value = value[1:-1]
         values[key.strip()] = value
     return values
@@ -104,15 +106,17 @@ class PsFTP:
     (default ``/home/panthyr/data/sftp.env``) with the keys SFTP_SERVER, SFTP_PORT, SFTP_USER,
     SFTP_KEY_FILE and SFTP_REMOTE_DIR. Explicit constructor arguments override the file.
 
-    Every upload runs in a new ``sftp`` process (batch mode); ``connect()`` verifies that the
-    server can be reached and the key is accepted.
+    Each ``sftp`` batch runs in a new process; ``connect()`` verifies that the server can be
+    reached and the key is accepted.
 
-    Remote paths given to :meth:`upload_file` are relative to ``/<SFTP_REMOTE_DIR>/`` on the
-    server. Missing directories are created.
+    upload_file uses the local filename in
+    /<SFTP_REMOTE_DIR>/<current local year>/. Paths passed to delete_file are
+    relative to that directory. Uploads attempt to create the target directories if needed.
 
     Example:
         >>> with PsFTP() as client:
-        ...     client.upload_file('file.txt', '2026/file.txt', max_upload_speed_kb=100)
+        ...     client.upload_file('/data/abc.db')
+        # With SFTP_REMOTE_DIR=TBBE in 2026: /TBBE/2026/abc.db
     """
 
     def __init__(
@@ -134,7 +138,8 @@ class PsFTP:
             key_file: Path to the SSH private key (default: SFTP_KEY_FILE)
             port: Server port (default: SFTP_PORT, or 22)
             timeout: Connection timeout in seconds, also used per sftp operation (default: 20)
-            remote_dir: Directory in the server root to upload into (default: SFTP_REMOTE_DIR)
+            remote_dir: Station directory under the server root (default: SFTP_REMOTE_DIR).
+                The current local year is appended automatically.
             env_file: Path to the env file
             verbose: Run sftp with maximum verbosity (-vvv) and log its output at DEBUG level
 
@@ -193,7 +198,6 @@ class PsFTP:
             msg = f'SSH key file not found: {self.key_file}'
             raise PsFTPConfigError(msg)
 
-        log.info(f'Connecting to SFTP server {self.server}:{self.port} (timeout: {self.timeout}s)')
         try:
             result = self._run_batch(['pwd'])
         except subprocess.TimeoutExpired as e:
@@ -216,7 +220,6 @@ class PsFTP:
             raise PsFTPConnectionError(msg)
 
         self._connected = True
-        log.info(f'Successfully connected to {self.server}')
 
     def disconnect(self) -> None:
         """Mark the client as disconnected (no persistent session is kept)."""
@@ -229,20 +232,19 @@ class PsFTP:
     def upload_file(
         self,
         local_path: Union[str, Path],
-        remote_path: str,
         max_upload_speed_kb: Optional[int] = None,
     ) -> None:
-        """Upload a file to ``/<remote_dir>/<remote_path>``.
+        """Upload a file to /<remote_dir>/<current local year>/<local filename>.
 
         The file is first uploaded as 'uploading.now' in the target directory to avoid
         partial file visibility. After the size is verified, any existing target is removed
         and the temporary file is renamed (the OpenSSH sftp client has no atomic overwrite,
-        so there is a very short window without the target file).
+        so there is a very short window without the target file). Missing target directories
+        are created when permitted by the server.
 
         Args:
-            local_path: Path to the local file to upload
-            remote_path: Destination path, relative to the remote directory
-            max_upload_speed_kb: Maximum upload speed in KB/s (default: None, unlimited)
+            local_path: Path to the local file to upload; its filename is used on the server
+            max_upload_speed_kb: Maximum speed in KB/s (default: None, unlimited)
 
         Raises:
             PsFTPFileNotFoundError: If the local file does not exist
@@ -255,8 +257,7 @@ class PsFTP:
         self._validate_local_file(local_path)
         self._ensure_connected()
 
-        rel = PurePosixPath(remote_path.lstrip('/'))
-        final_path = (PurePosixPath('/') / self.remote_dir / rel).as_posix()
+        final_path = self._remote_path(local_path.name)
         target_dir = PurePosixPath(final_path).parent
         temp_path = (target_dir / 'uploading.now').as_posix()
 
@@ -294,15 +295,19 @@ class PsFTP:
         )
 
     def delete_file(self, remote_path: str) -> None:
-        """Delete ``/<remote_dir>/<remote_path>`` from the server.
+        """Delete /<remote_dir>/<current local year>/<remote_path> from the server.
+
+        The year is determined at the time of this call.
+
+        Args:
+            remote_path: Path including the filename, relative to the current local year directory.
 
         Raises:
             PsFTPNotConnectedError: If not connected to SFTP server
             PsFTPError: If the removal fails
         """
         self._ensure_connected()
-        rel = PurePosixPath(remote_path.lstrip('/'))
-        final_path = (PurePosixPath('/') / self.remote_dir / rel).as_posix()
+        final_path = self._remote_path(remote_path)
         self._run_checked(
             [f'rm {_quote(final_path)}'],
             error_cls=PsFTPError,
@@ -312,6 +317,11 @@ class PsFTP:
     # ========================================================================
     # Internals
     # ========================================================================
+
+    def _remote_path(self, remote_path: str) -> str:
+        year = datetime.now().astimezone().strftime('%Y')
+        rel = PurePosixPath(remote_path.lstrip('/'))
+        return (PurePosixPath('/') / self.remote_dir / year / rel).as_posix()
 
     def _validate_local_file(self, local_path: Path) -> None:
         if not local_path.exists():
